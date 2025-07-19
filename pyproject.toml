@@ -1,0 +1,11 @@
+[project]
+name = "infinity-utils"
+version = "0.1.0"
+description = "A collection of utility functions and classes."
+authors = ["The Infinity AI Lab foundation"]
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "pydantic",
+    "google-cloud-firestore",
+]
