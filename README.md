@@ -10,7 +10,7 @@ A lightweight, asynchronous Object-Document Mapper (ODM) for Google Cloud Firest
 
 - **Pydantic-based validation**: Define your models using Pydantic for automatic data validation.
 - **Asynchronous API**: All database operations are `async`, designed for modern Python applications.
-- **Simple, Django-like API**: Familiar `save()`, `get()`, `find()`, and `delete()` methods.
+- **Simple, Django-like API**: Familiar `save()`, `get()`, and `delete()` methods, plus a chainable query builder.
 - **Automatic Timestamps**: `created_at` and `updated_at` fields are automatically managed.
 
 ### Installation
@@ -90,20 +90,20 @@ async def get_user(user_id: str):
 # asyncio.run(get_user("some_user_id"))
 ```
 
-**Find documents with queries:**
-Use the `find()` method with `google.cloud.firestore.FieldFilter` to query the collection.
+**Querying for documents:**
+Use `filter()`, `order_by()`, `limit()`, and `offset()` to build queries. These methods can be chained. Call `get()` on the query builder to execute the query and retrieve the results.
 
 ```python
 from google.cloud.firestore import FieldFilter
 
 async def find_users():
     # Find all users older than 25
-    users = await User.find(FieldFilter("age", ">", 25))
+    users = await User.filter(FieldFilter("age", ">", 25)).get()
     for user in users:
         print(f"Found user: {user.name}, Age: {user.age}")
 
-    # Find a specific user by email
-    users = await User.find(FieldFilter("email", "==", "john.doe@example.com"))
+    # Find a specific user by email and order by name
+    users = await User.filter(FieldFilter("email", "==", "john.doe@example.com")).order_by("name").get()
     if users:
         print(f"Found user by email: {users[0].name}")
 
@@ -111,11 +111,11 @@ async def find_users():
 # asyncio.run(find_users())
 ```
 
-The `find` method also supports `order_by` and `limit`:
+You can chain methods to create more complex queries:
 
 ```python
 # Get the 2 oldest users
-users = await User.find(order_by=["-age"], limit=2)
+users = await User.order_by("-age").limit(2).get()
 ```
 
 ### Updating Documents
