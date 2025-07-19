@@ -1,16 +1,88 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, ClassVar, TypeVar, get_args, get_origin
+from typing import Any, ClassVar, Generic, TypeVar, get_args, get_origin
 
 from google.cloud.firestore import AsyncClient, FieldFilter
 from google.cloud.firestore_v1.base_collection import _auto_id
+from google.cloud.firestore_v1.query import Query
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
 from infinity_utils.firestore.exception import ModelValidationError
 from infinity_utils.firestore.validation import _validate_field_path_and_get_type
 
 T = TypeVar("T", bound="Model")
+
+
+class QueryBuilder(Generic[T]):
+    def __init__(self, model_cls: type[T]) -> None:
+        self._model_cls = model_cls
+        db = model_cls._get_db()
+        self._query: Query = db.collection(model_cls._collection_name)
+
+    def filter(self, *queries: FieldFilter) -> QueryBuilder[T]:
+        """Add where clauses to the query."""
+        for f in queries:
+            try:
+                field_path = f.field_path
+                op = f.op_string
+                value = f.value
+                field_type = _validate_field_path_and_get_type(self._model_cls, field_path)
+                if op in ("in", "not_in", "array_contains_any"):
+                    if not isinstance(value, (list, tuple)):
+                        raise TypeError(f"Value for operator '{op}' on field '{field_path}' must be a list or tuple.")
+                    if get_origin(field_type) in (list, set):  # array_contains_any
+                        item_type = get_args(field_type)[0]
+                        TypeAdapter(list[item_type]).validate_python(value)
+                    else:  # in, not_in
+                        TypeAdapter(list[field_type]).validate_python(value)
+                elif get_origin(field_type) in (list, set) and op == "array_contains":
+                    item_type = get_args(field_type)[0]
+                    TypeAdapter(item_type).validate_python(value)
+                else:
+                    TypeAdapter(field_type).validate_python(value)
+            except (ValueError, TypeError, ValidationError) as e:
+                raise ValueError(f"Validation failed for query ('{field_path}', '{op}', ...): {e}") from e
+            self._query = self._query.where(filter=f)
+        return self
+
+    def order_by(self, *fields: str) -> QueryBuilder[T]:
+        """Add order by clauses to the query."""
+        for field in fields:
+            field_name = field.lstrip("-")
+            try:
+                _validate_field_path_and_get_type(self._model_cls, field_name)
+            except (ValueError, TypeError) as e:
+                raise ValueError(f"Validation failed for order_by field '{field_name}': {e}") from e
+            direction = "DESCENDING" if field.startswith("-") else "ASCENDING"
+            self._query = self._query.order_by(field_name, direction=direction)
+        return self
+
+    def limit(self, limit: int) -> QueryBuilder[T]:
+        """Add a limit to the query."""
+        self._query = self._query.limit(limit)
+        return self
+
+    def offset(self, offset: int) -> QueryBuilder[T]:
+        """Add an offset to the query."""
+        self._query = self._query.offset(offset)
+        return self
+
+    async def get(self) -> list[T]:
+        """Execute the query and return the results."""
+        docs = await self._query.get()
+        results = []
+        for doc in docs:
+            try:
+                results.append(self._model_cls(**doc.to_dict(), id=doc.id))
+            except ValidationError as e:
+                raise ModelValidationError(
+                    model_name=self._model_cls.__name__,
+                    doc_id=doc.id,
+                    collection_name=self._model_cls._collection_name,
+                    validation_error=e,
+                ) from e
+        return results
 
 
 class Model(BaseModel):
@@ -97,74 +169,21 @@ class Model(BaseModel):
         await db.collection(self._collection_name).document(self.id).delete()
 
     @classmethod
-    async def find(
-        cls: type[T],
-        *queries: FieldFilter,
-        order_by: list[str] | None = None,
-        limit: int | None = None,
-    ) -> list[T]:
-        """Find documents in Firestore.
+    def filter(cls: type[T], *queries: FieldFilter) -> QueryBuilder[T]:
+        """Creates a query builder with the specified filters."""
+        return QueryBuilder(cls).filter(*queries)
 
-        Args:
-            *queries: A list of queries to filter by. Each query is a FieldFilter.
-            order_by: A list of fields to order by. Prefix with `-` for descending order.
-            limit: The maximum number of documents to return.
-        """
-        # Runtime validation of query arguments
-        for f in queries:
-            try:
-                field_path = f.field_path
-                op = f.op_string
-                value = f.value
-                field_type = _validate_field_path_and_get_type(cls, field_path)
-                if op in ("in", "not_in", "array_contains_any"):
-                    if not isinstance(value, (list, tuple)):
-                        raise TypeError(f"Value for operator '{op}' on field '{field_path}' must be a list or tuple.")
-                    if get_origin(field_type) in (list, set):  # array_contains_any
-                        item_type = get_args(field_type)[0]
-                        TypeAdapter(list[item_type]).validate_python(value)
-                    else:  # in, not_in
-                        TypeAdapter(list[field_type]).validate_python(value)
-                elif get_origin(field_type) in (list, set) and op == "array_contains":
-                    item_type = get_args(field_type)[0]
-                    TypeAdapter(item_type).validate_python(value)
-                else:
-                    TypeAdapter(field_type).validate_python(value)
-            except (ValueError, TypeError, ValidationError) as e:
-                raise ValueError(f"Validation failed for query ('{field_path}', '{op}', ...): {e}") from e
+    @classmethod
+    def order_by(cls: type[T], *fields: str) -> QueryBuilder[T]:
+        """Creates a query builder with the specified ordering."""
+        return QueryBuilder(cls).order_by(*fields)
 
-        if order_by:
-            for field in order_by:
-                field_name = field.lstrip("-")
-                try:
-                    _validate_field_path_and_get_type(cls, field_name)
-                except (ValueError, TypeError) as e:
-                    raise ValueError(f"Validation failed for order_by field '{field_name}': {e}") from e
+    @classmethod
+    def limit(cls: type[T], limit: int) -> QueryBuilder[T]:
+        """Creates a query builder with the specified limit."""
+        return QueryBuilder(cls).limit(limit)
 
-        db = cls._get_db()
-        query = db.collection(cls._collection_name)
-        for f in queries:
-            query = query.where(filter=f)
-
-        if order_by:
-            for field in order_by:
-                direction = "DESCENDING" if field.startswith("-") else "ASCENDING"
-                field_name = field.lstrip("-")
-                query = query.order_by(field_name, direction=direction)
-
-        if limit:
-            query = query.limit(limit)
-
-        docs = await query.get()
-        results = []
-        for doc in docs:
-            try:
-                results.append(cls(**doc.to_dict(), id=doc.id))
-            except ValidationError as e:
-                raise ModelValidationError(
-                    model_name=cls.__name__,
-                    doc_id=doc.id,
-                    collection_name=cls._collection_name,
-                    validation_error=e,
-                ) from e
-        return results
+    @classmethod
+    def offset(cls: type[T], offset: int) -> QueryBuilder[T]:
+        """Creates a query builder with the specified offset."""
+        return QueryBuilder(cls).offset(offset)
