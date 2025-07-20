@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, ClassVar, Generic, TypeVar, get_args, get_origin
+from typing import Any, ClassVar, Generic, Optional, TypeVar, cast, get_args, get_origin
 
-from google.cloud.firestore import AsyncClient, FieldFilter
+from google.cloud.firestore import AsyncClient, AsyncQuery, FieldFilter
+from google.cloud.firestore_v1.async_aggregation import AsyncAggregationQuery
 from google.cloud.firestore_v1.base_collection import _auto_id
-from google.cloud.firestore_v1.query import Query
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
 from infinity_utils.firestore.exception import ModelValidationError
@@ -18,7 +18,7 @@ class QueryBuilder(Generic[T]):
     def __init__(self, model_cls: type[T]) -> None:
         self._model_cls = model_cls
         db = model_cls._get_db()
-        self._query: Query = db.collection(model_cls._collection_name)
+        self._query: AsyncQuery = db.collection(model_cls._collection_name)  # type: ignore
 
     def filter(self, *queries: FieldFilter) -> QueryBuilder[T]:
         """Add where clauses to the query."""
@@ -70,9 +70,9 @@ class QueryBuilder(Generic[T]):
 
     async def get(self) -> list[T]:
         """Execute the query and return the results."""
-        docs = await self._query.get()
+        docs_ref = await self._query.get()
         results = []
-        for doc in docs:
+        for doc in docs_ref:
             try:
                 results.append(self._model_cls(**doc.to_dict(), id=doc.id))
             except ValidationError as e:
@@ -83,6 +83,21 @@ class QueryBuilder(Generic[T]):
                     validation_error=e,
                 ) from e
         return results
+
+    def count(self) -> "CountQueryBuilder[T]":
+        """Return a CountQueryBuilder for counting documents that match the query."""
+        return CountQueryBuilder(self._model_cls, self._query)
+
+
+class CountQueryBuilder(Generic[T]):
+    def __init__(self, model_cls: type[T], query: AsyncAggregationQuery | AsyncQuery) -> None:
+        self._model_cls = model_cls
+        self._query = query.count()
+
+    async def get(self) -> int:
+        """Execute the count query and return the count."""
+        result = await self._query.get()
+        return cast(int, result[0][0].value)
 
 
 class Model(BaseModel):
@@ -134,7 +149,7 @@ class Model(BaseModel):
         """Save the document to Firestore."""
         self.updated_at = datetime.now(timezone.utc)
         try:
-            type(self).model_validate(self.model_dump())
+            type(self)(**self.model_dump())
         except ValidationError as e:
             raise ModelValidationError(
                 model_name=self.__class__.__name__,
@@ -147,14 +162,14 @@ class Model(BaseModel):
         return self
 
     @classmethod
-    async def get(cls: type[T], id: str) -> T | None:
+    async def get(cls: type[T], id: str) -> Optional[T]:
         """Get a document from Firestore by id."""
         db = cls._get_db()
         doc = await db.collection(cls._collection_name).document(id).get()
         if not doc.exists:
             return None
         try:
-            return cls(**doc.to_dict(), id=doc.id)
+            return cast(Optional[T], cls(**doc.to_dict(), id=doc.id))
         except ValidationError as e:
             raise ModelValidationError(
                 model_name=cls.__name__,
@@ -187,3 +202,8 @@ class Model(BaseModel):
     def offset(cls: type[T], offset: int) -> QueryBuilder[T]:
         """Creates a query builder with the specified offset."""
         return QueryBuilder(cls).offset(offset)
+
+    @classmethod
+    async def count(cls: type[T]) -> int:
+        """Count all documents in the collection."""
+        return await QueryBuilder(cls).count().get()

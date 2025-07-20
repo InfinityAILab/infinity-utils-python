@@ -1,6 +1,6 @@
 [project]
 name = "infinity-utils"
-version = "0.1.0"
+version = "0.1.2"
 description = "A collection of utility functions and classes."
 authors = [
       {name = "Infinity AI Lab"}
